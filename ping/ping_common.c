@@ -29,6 +29,9 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+
+#define _GNU_SOURCE
+
 #include "iputils_common.h"
 #include "ping.h"
 
@@ -42,26 +45,32 @@ static uid_t euid;
 
 void usage(void)
 {
-	fprintf(stderr,
+	fprintf(stderr, _(
 		"\nUsage\n"
 		"  ping [options] <destination>\n"
 		"\nOptions:\n"
-		"  <destination>      dns name or ip address\n"
+		"  <destination>      DNS name or IP address\n"
 		"  -a                 use audible ping\n"
 		"  -A                 use adaptive ping\n"
 		"  -B                 sticky source address\n"
 		"  -c <count>         stop after <count> replies\n"
+		"  -C                 call connect() syscall on socket creation\n"
 		"  -D                 print timestamps\n"
 		"  -d                 use SO_DEBUG socket option\n"
+		"  -e <identifier>    define identifier for ping session, default is random for\n"
+		"                     SOCK_RAW and kernel defined for SOCK_DGRAM\n"
+		"                     Imply using SOCK_RAW (for IPv4 only for identifier 0)\n"
 		"  -f                 flood ping\n"
 		"  -h                 print help and exit\n"
+		"  -H                 force reverse DNS name resolution (useful for numeric\n"
+		"                     destinations or for -f), override -n\n"
 		"  -I <interface>     either interface name or address\n"
 		"  -i <interval>      seconds between sending each packet\n"
 		"  -L                 suppress loopback of multicast packets\n"
 		"  -l <preload>       send <preload> number of packages while waiting replies\n"
 		"  -m <mark>          tag the packets going out\n"
-		"  -M <pmtud opt>     define mtu discovery, can be one of <do|dont|want>\n"
-		"  -n                 no dns name resolution\n"
+		"  -M <pmtud opt>     define path MTU discovery, can be one of <do|dont|want|probe>\n"
+		"  -n                 no reverse DNS name resolution, override -H\n"
 		"  -O                 report outstanding replies\n"
 		"  -p <pattern>       contents of padding byte\n"
 		"  -q                 quiet output\n"
@@ -82,9 +91,9 @@ void usage(void)
 		"\nIPv6 options:\n"
 		"  -6                 use IPv6\n"
 		"  -F <flowlabel>     define flow label, default is random\n"
-		"  -N <nodeinfo opt>  use icmp6 node info query, try <help> as argument\n"
+		"  -N <nodeinfo opt>  use IPv6 node info query, try <help> as argument\n"
 		"\nFor more details see ping(8).\n"
-	);
+	));
 	exit(2);
 }
 
@@ -276,8 +285,8 @@ static inline void update_interval(struct ping_rts *rts)
 	int est = rts->rtt ? rts->rtt / 8 : rts->interval * 1000;
 
 	rts->interval = (est + rts->rtt_addend + 500) / 1000;
-	if (rts->uid && rts->interval < MINUSERINTERVAL)
-		rts->interval = MINUSERINTERVAL;
+	if (rts->uid && rts->interval < MIN_USER_INTERVAL_MS)
+		rts->interval = MIN_USER_INTERVAL_MS;
 }
 
 /*
@@ -296,7 +305,7 @@ void print_timestamp(struct ping_rts *rts)
 /*
  * pinger --
  * 	Compose and transmit an ICMP ECHO REQUEST packet.  The IP packet
- * will be added on by the kernel.  The ID field is a random number,
+ * will be added on by the kernel.  The ID field is our UNIX process ID,
  * and the sequence number is an ascending integer.  The first several bytes
  * of the data portion are used to hold a UNIX "timeval" struct in VAX
  * byte-order, to compute the round-trip time.
@@ -312,7 +321,7 @@ int pinger(struct ping_rts *rts, ping_func_set_st *fset, socket_st *sock)
 		return 1000;
 
 	/* Check that packets < rate*time + preload */
-	if (rts->cur_time.tv_sec == 0) {
+	if (rts->cur_time.tv_sec == 0 && rts->cur_time.tv_nsec == 0) {
 		clock_gettime(CLOCK_MONOTONIC_RAW, &rts->cur_time);
 		tokens = rts->interval * (rts->preload - 1);
 	} else {
@@ -325,8 +334,8 @@ int pinger(struct ping_rts *rts, ping_func_set_st *fset, socket_st *sock)
 		if (!rts->interval) {
 			/* Case of unlimited flood is special;
 			 * if we see no reply, they are limited to 100pps */
-			if (ntokens < MININTERVAL && in_flight(rts) >= rts->preload)
-				return MININTERVAL - ntokens;
+			if (ntokens < MIN_INTERVAL_MS && in_flight(rts) >= rts->preload)
+				return MIN_INTERVAL_MS - ntokens;
 		}
 		ntokens += tokens;
 		tmp = (long)rts->interval * (long)rts->preload;
@@ -390,7 +399,7 @@ resend:
 	} else if (errno == EAGAIN) {
 		/* Socket buffer is full. */
 		tokens += rts->interval;
-		return MININTERVAL;
+		return MIN_INTERVAL_MS;
 	} else {
 		if ((i = fset->receive_error_msg(rts, sock)) > 0) {
 			/* An ICMP error arrived. In this case, we've received
@@ -446,6 +455,25 @@ void sock_setbufs(struct ping_rts *rts, socket_st *sock, int alloc)
 	}
 }
 
+void sock_setmark(unsigned int mark, int fd)
+{
+#ifdef SO_MARK
+	int ret;
+	int errno_save;
+
+	enable_capability_admin();
+	ret = setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark));
+	errno_save = errno;
+	disable_capability_admin();
+
+	/* Do not exit, old kernels do not support mark. */
+	if (ret == -1)
+		error(0, errno_save, _("WARNING: failed to set mark: %u"), mark);
+#else
+		error(0, errno_save, _("WARNING: SO_MARK not supported"));
+#endif
+}
+
 /* Protocol independent setup and parameter checks. */
 
 void setup(struct ping_rts *rts, socket_st *sock)
@@ -457,8 +485,9 @@ void setup(struct ping_rts *rts, socket_st *sock)
 	if (rts->opt_flood && !rts->opt_interval)
 		rts->interval = 0;
 
-	if (rts->uid && rts->interval < MINUSERINTERVAL)
-		error(2, 0, _("cannot flood; minimal interval allowed for user is %dms"), MINUSERINTERVAL);
+	if (rts->uid && rts->interval < MIN_USER_INTERVAL_MS)
+		error(2, 0, _("cannot flood, minimal interval for user must be >= %d ms, use -i %s (or higher)"),
+			  MIN_USER_INTERVAL_MS, str_interval(MIN_USER_INTERVAL_MS));
 
 	if (rts->interval >= INT_MAX / rts->preload)
 		error(2, 0, _("illegal preload and/or interval: %d"), rts->interval);
@@ -476,22 +505,9 @@ void setup(struct ping_rts *rts, socket_st *sock)
 			error(0, 0, _("Warning: no SO_TIMESTAMP support, falling back to SIOCGSTAMP"));
 	}
 #endif
-#ifdef SO_MARK
-	if (rts->opt_mark) {
-		int ret;
-		int errno_save;
 
-		enable_capability_admin();
-		ret = setsockopt(sock->fd, SOL_SOCKET, SO_MARK, &rts->mark, sizeof(rts->mark));
-		errno_save = errno;
-		disable_capability_admin();
-
-		if (ret == -1) {
-			/* Do not exit, old kernels do not support mark. */
-			error(0, errno_save, _("Warning: Failed to set mark: %d"), rts->mark);
-		}
-	}
-#endif
+	if (rts->opt_mark)
+		sock_setmark(rts->mark, sock->fd);
 
 	/* Set some SNDTIMEO to prevent blocking forever
 	 * on sends, when device is too slow or stalls. Just put limit
@@ -521,8 +537,8 @@ void setup(struct ping_rts *rts, socket_st *sock)
 			*p++ = i;
 	}
 
-	if (sock->socktype == SOCK_RAW)
-		rts->ident = rand() & 0xFFFF;
+	if (sock->socktype == SOCK_RAW && rts->ident == -1)
+		rts->ident = htons(getpid() & 0xFFFF);
 
 	set_signal(SIGINT, sigexit);
 	set_signal(SIGALRM, sigexit);
@@ -551,24 +567,6 @@ void setup(struct ping_rts *rts, socket_st *sock)
 				rts->screen_width = w.ws_col;
 		}
 	}
-}
-
-/*
- * Return 0 if pattern in payload point to be ptr did not match the pattern that was sent  
- */
-int contains_pattern_in_payload(struct ping_rts *rts, uint8_t *ptr)
-{
-	size_t i;
-	uint8_t *cp, *dp;
- 
-	/* check the data */
-	cp = ((u_char *)ptr) + sizeof(struct timeval);
-	dp = &rts->outpack[8 + sizeof(struct timeval)];
-	for (i = sizeof(struct timeval); i < rts->datalen; ++i, ++cp, ++dp) {
-		if (*cp != *dp)
-			return 0;
-	}
-	return 1;
 }
 
 int main_loop(struct ping_rts *rts, ping_func_set_st *fset, socket_st *sock,
@@ -622,10 +620,10 @@ int main_loop(struct ping_rts *rts, ping_func_set_st *fset, socket_st *sock,
 			 * required timeout. */
 			if (1000 % HZ == 0 ? next <= 1000 / HZ : (next < INT_MAX / HZ && next * HZ <= 1000)) {
 				/* Very short timeout... So, if we wait for
-				 * something, we sleep for MININTERVAL.
+				 * something, we sleep for MIN_INTERVAL_MS.
 				 * Otherwise, spin! */
 				if (recv_expected) {
-					next = MININTERVAL;
+					next = MIN_INTERVAL_MS;
 				} else {
 					next = 0;
 					/* When spinning, no reasons to poll.
@@ -729,7 +727,8 @@ int main_loop(struct ping_rts *rts, ping_func_set_st *fset, socket_st *sock,
 int gather_statistics(struct ping_rts *rts, uint8_t *icmph, int icmplen,
 		      int cc, uint16_t seq, int hops,
 		      int csfailed, struct timeval *tv, char *from,
-		      void (*pr_reply)(uint8_t *icmph, int cc), int multicast)
+		      void (*pr_reply)(uint8_t *icmph, int cc), int multicast,
+		      int wrong_source)
 {
 	int dupflag = 0;
 	long triptime = 0;
@@ -802,6 +801,9 @@ restamp:
 		if (pr_reply)
 			pr_reply(icmph, cc);
 
+		if (rts->opt_verbose && rts->ident != -1)
+			printf(_(" ident=%d"), ntohs(rts->ident));
+
 		if (hops >= 0)
 			printf(_(" ttl=%d"), hops);
 
@@ -822,10 +824,13 @@ restamp:
 				printf(_(" time=%ld.%03ld ms"), triptime / 1000,
 				       triptime % 1000);
 		}
+
 		if (dupflag && (!multicast || rts->opt_verbose))
 			printf(_(" (DUP!)"));
 		if (csfailed)
 			printf(_(" (BAD CHECKSUM!)"));
+		if (wrong_source)
+			printf(_(" (DIFFERENT ADDRESS!)"));
 
 		/* check the data */
 		cp = ((unsigned char *)ptr) + sizeof(struct timeval);
@@ -960,4 +965,20 @@ void status(struct ping_rts *rts)
 inline int is_ours(struct ping_rts *rts, socket_st * sock, uint16_t id)
 {
 	return sock->socktype == SOCK_DGRAM || id == rts->ident;
+}
+
+char *str_interval(int interval)
+{
+	static char buf[14];
+
+	/*
+	 * Avoid messing with locales and floating point due the different decimal
+	 * point depending on locales.
+	 */
+	if (interval % 1000)
+		snprintf(buf, sizeof(buf), "%1i.%03i", interval/1000, interval%1000);
+	else
+		snprintf(buf, sizeof(buf), "%i", interval/1000);
+
+	return buf;
 }

@@ -39,7 +39,7 @@ xml:id="man.clockdiff">
     </cmdsynopsis>
   </refsynopsisdiv>
 
-  <refsection>
+  <refsection xml:id="description">
     <info>
       <title>DESCRIPTION</title>
     </info>
@@ -48,10 +48,10 @@ xml:id="man.clockdiff">
     us and
     <emphasis remap="I">destination</emphasis> with 1 msec
     resolution using ICMP TIMESTAMP [2] packets or, optionally, IP
-    TIMESTAMP option [3] option added to ICMP ECHO. [1]</para>
+    TIMESTAMP option [3] added to ICMP ECHO. [1]</para>
   </refsection>
 
-  <refsection>
+  <refsection xml:id="options">
     <info>
       <title>OPTIONS</title>
     </info>
@@ -198,8 +198,9 @@ xml:id="man.clockdiff">
   <refsect1 id='security'>
     <title>SECURITY</title>
     <para>
-    <command>clockdiff</command> requires CAP_NET_RAW capability to
-    be executed. It is safe to be used as set-uid root.</para>
+    <command>clockdiff</command> requires CAP_NET_RAW and
+    CAP_SYS_NICE capabilities to be executed. It is safe
+    to be used as set-uid root.</para>
   </refsect1>
 
   <refsect1 id='availability'>

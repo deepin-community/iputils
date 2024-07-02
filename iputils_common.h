@@ -55,6 +55,12 @@
 #ifndef IPV6_PMTUDISC_DO
 # define IPV6_PMTUDISC_DO	2
 #endif
+#ifndef IP_PMTUDISC_PROBE
+# define IP_PMTUDISC_PROBE	3
+#endif
+#ifndef IPV6_PMTUDISC_PROBE
+# define IPV6_PMTUDISC_PROBE	3
+#endif
 
 #ifdef HAVE_ERROR_H
 # include <error.h>
@@ -66,8 +72,11 @@ extern int close_stream(FILE *stream);
 extern void close_stdout(void);
 extern long strtol_or_err(char const *const str, char const *const errmesg,
 			  const long min, const long max);
+extern unsigned long strtoul_or_err(char const *const str, char const *const errmesg,
+			  const unsigned long min, const unsigned long max);
 extern void iputils_srand(void);
 extern void timespecsub(struct timespec *a, struct timespec *b,
 			struct timespec *res);
+void print_config(void);
 
 #endif /* IPUTILS_COMMON_H */
