@@ -53,14 +53,18 @@
  *	Public Domain.  Distribution Unlimited.
  * Bugs -
  *	More statistics could always be gathered.
- *	If kernel does not support non-raw ICMP sockets or
+ *	If kernel does not support ICMP datagram sockets or
  *	if -N option is used, this program has to run SUID to ROOT or
  *	with net_cap_raw enabled.
  */
+
+#define _GNU_SOURCE
+
 #include <stddef.h>
 
 #include "iputils_common.h"
 #include "iputils_ni.h"
+#include "ipv6.h"
 #include "ping.h"
 
 #ifndef IPV6_FLOWLABEL_MGR
@@ -101,6 +105,7 @@ int ping6_run(struct ping_rts *rts, int argc, char **argv, struct addrinfo *ai,
 	      struct socket_st *sock)
 {
 	int hold, packlen;
+	size_t i;
 	unsigned char *packet;
 	char *target;
 	struct icmp6_filter filter;
@@ -177,9 +182,16 @@ int ping6_run(struct ping_rts *rts, int argc, char **argv, struct addrinfo *ai,
 			disable_capability_raw();
 		}
 
+		if (rts->tclass &&
+		    setsockopt(probe_fd, IPPROTO_IPV6, IPV6_TCLASS, &rts->tclass, sizeof (rts->tclass)) <0)
+			error(2, errno, "setsockopt(IPV6_TCLASS)");
+
 		if (!IN6_IS_ADDR_LINKLOCAL(&rts->firsthop.sin6_addr) &&
 		    !IN6_IS_ADDR_MC_LINKLOCAL(&rts->firsthop.sin6_addr))
 			rts->firsthop.sin6_family = AF_INET6;
+
+		if (rts->opt_mark)
+			sock_setmark(rts->mark, probe_fd);
 
 		rts->firsthop.sin6_port = htons(1025);
 		if (connect(probe_fd, (struct sockaddr *)&rts->firsthop, sizeof(rts->firsthop)) == -1) {
@@ -222,6 +234,8 @@ int ping6_run(struct ping_rts *rts, int argc, char **argv, struct addrinfo *ai,
 	if (rts->device) {
 		struct cmsghdr *cmsg;
 		struct in6_pktinfo *ipi;
+		int rc;
+		int errno_save;
 
 		cmsg = (struct cmsghdr *)(rts->cmsgbuf + rts->cmsglen);
 		rts->cmsglen += CMSG_SPACE(sizeof(*ipi));
@@ -232,19 +246,43 @@ int ping6_run(struct ping_rts *rts, int argc, char **argv, struct addrinfo *ai,
 		ipi = (struct in6_pktinfo *)CMSG_DATA(cmsg);
 		memset(ipi, 0, sizeof(*ipi));
 		ipi->ipi6_ifindex = if_name2index(rts->device);
+
+		if (rts->opt_strictsource) {
+			enable_capability_raw();
+			rc = setsockopt(sock->fd, SOL_SOCKET, SO_BINDTODEVICE,
+					rts->device, strlen(rts->device) + 1);
+			errno_save = errno;
+			disable_capability_raw();
+
+			if (rc == -1)
+				error(2, errno_save, "SO_BINDTODEVICE %s", rts->device);
+		}
 	}
 
 	if (IN6_IS_ADDR_MULTICAST(&rts->whereto6.sin6_addr)) {
 		rts->multicast = 1;
+
 		if (rts->uid) {
-			if (rts->interval < 1000)
-				error(2, 0, _("multicast ping with too short interval: %d"),
-					    rts->interval);
+			if (rts->interval < MIN_MULTICAST_USER_INTERVAL_MS)
+				error(2, 0, _("minimal interval for multicast ping for user must be >= %d ms, use -i %s (or higher)"),
+					  MIN_MULTICAST_USER_INTERVAL_MS,
+					  str_interval(MIN_MULTICAST_USER_INTERVAL_MS));
+
 			if (rts->pmtudisc >= 0 && rts->pmtudisc != IPV6_PMTUDISC_DO)
 				error(2, 0, _("multicast ping does not fragment"));
 		}
+
 		if (rts->pmtudisc < 0)
 			rts->pmtudisc = IPV6_PMTUDISC_DO;
+	}
+
+	/* detect Subnet-Router anycast at least for the default prefix 64 */
+	rts->subnet_router_anycast = 1;
+	for (i = 8; i < sizeof(struct in6_addr); i++) {
+		if (rts->whereto6.sin6_addr.s6_addr[i]) {
+			rts->subnet_router_anycast = 0;
+			break;
+		}
 	}
 
 	if (rts->pmtudisc >= 0) {
@@ -253,9 +291,14 @@ int ping6_run(struct ping_rts *rts, int argc, char **argv, struct addrinfo *ai,
 			error(2, errno, "IPV6_MTU_DISCOVER");
 	}
 
-	if (rts->opt_strictsource &&
-	    bind(sock->fd, (struct sockaddr *)&rts->source6, sizeof rts->source6) == -1)
-		error(2, errno, "bind icmp socket");
+	int set_ident = rts->ident > 0 && sock->socktype == SOCK_DGRAM;
+	if (set_ident)
+		rts->source6.sin6_port = rts->ident;
+
+	if (rts->opt_strictsource || set_ident) {
+		if (bind(sock->fd, (struct sockaddr *)&rts->source6, sizeof rts->source6) == -1)
+			error(2, errno, "bind icmp socket");
+	}
 
 	if ((ssize_t)rts->datalen >= (ssize_t)sizeof(struct timeval) && (rts->ni.query < 0)) {
 		/* can we time transfer */
@@ -333,15 +376,6 @@ int ping6_run(struct ping_rts *rts, int argc, char **argv, struct addrinfo *ai,
 	   )
 		error(2, errno, _("can't receive hop limit"));
 
-	if (rts->opt_tclass) {
-#ifdef IPV6_TCLASS
-		if (setsockopt(sock->fd, IPPROTO_IPV6, IPV6_TCLASS, &rts->tclass, sizeof rts->tclass) == -1)
-			error(2, errno, _("setsockopt(IPV6_TCLASS)"));
-#else
-		error(0, 0, _("traffic class is not supported"));
-#endif
-	}
-
 	if (rts->opt_flowinfo) {
 		char freq_buf[CMSG_ALIGN(sizeof(struct in6_flowlabel_req)) + rts->cmsglen];
 		struct in6_flowlabel_req *freq = (struct in6_flowlabel_req *)freq_buf;
@@ -361,7 +395,7 @@ int ping6_run(struct ping_rts *rts, int argc, char **argv, struct addrinfo *ai,
 			error(2, errno, _("can't send flowinfo"));
 	}
 
-	printf(_("PING %s(%s) "), rts->hostname, pr_addr(rts, &rts->whereto6, sizeof rts->whereto6));
+	printf(_("PING %s (%s) "), rts->hostname, pr_raw_addr(rts, &rts->whereto6, sizeof rts->whereto6));
 	if (rts->flowlabel)
 		printf(_(", flow 0x%05x, "), (unsigned)ntohl(rts->flowlabel));
 	if (rts->device || rts->opt_strictsource) {
@@ -402,6 +436,12 @@ int print_icmp(uint8_t type, uint8_t code, uint32_t info)
 			break;
 		case ICMP6_DST_UNREACH_NOPORT:
 			printf(_("Port unreachable"));
+			break;
+		case ICMP6_DST_UNREACH_POLICYFAIL:
+			printf(_("Source address failed ingress/egress policy"));
+			break;
+		case ICMP6_DST_UNREACH_REJECTROUTE:
+			printf(_("Reject route to destination"));
 			break;
 		default:
 			printf(_("Unknown code %d"), code);
@@ -543,7 +583,7 @@ out:
 /*
  * pinger --
  * 	Compose and transmit an ICMP ECHO REQUEST packet.  The IP packet
- * will be added on by the kernel.  The ID field is a random number,
+ * will be added on by the kernel.  The ID field is our UNIX process ID,
  * and the sequence number is an ascending integer.  The first several bytes
  * of the data portion are used to hold a UNIX "timeval" struct in VAX
  * byte-order, to compute the round-trip time.
@@ -562,8 +602,7 @@ int build_echo(struct ping_rts *rts, uint8_t *_icmph,
 	icmph->icmp6_id = rts->ident;
 
 	if (rts->timing)
-		gettimeofday((struct timeval *)&_icmph[8],
-		    (struct timezone *)NULL);
+		gettimeofday((struct timeval *)&_icmph[8], NULL);
 
 	cc = rts->datalen + 8;			/* skips ICMP portion */
 
@@ -792,6 +831,7 @@ int ping6_parse_reply(struct ping_rts *rts, socket_st *sock,
 	struct cmsghdr *c;
 	struct icmp6_hdr *icmph;
 	int hops = -1;
+	int wrong_source = 0;
 
 	for (c = CMSG_FIRSTHDR(msg); c; c = CMSG_NXTHDR(msg, c)) {
 		if (c->cmsg_level != IPPROTO_IPV6)
@@ -818,18 +858,18 @@ int ping6_parse_reply(struct ping_rts *rts, socket_st *sock,
 	}
 
 	if (icmph->icmp6_type == ICMP6_ECHO_REPLY) {
-		if (!rts->multicast &&
-		    memcmp(&from->sin6_addr.s6_addr, &rts->whereto6.sin6_addr.s6_addr, 16))
-			return 1;
 		if (!is_ours(rts, sock, icmph->icmp6_id))
 			return 1;
-	       if (!contains_pattern_in_payload(rts, (uint8_t *)(icmph + 1)))
-			return 1;	/* 'Twas really not our ECHO */
+
+		if (!rts->multicast && !rts->subnet_router_anycast &&
+		    memcmp(&from->sin6_addr.s6_addr, &rts->whereto6.sin6_addr.s6_addr, 16))
+			wrong_source = 1;
+
 		if (gather_statistics(rts, (uint8_t *)icmph, sizeof(*icmph), cc,
 				      ntohs(icmph->icmp6_seq),
 				      hops, 0, tv, pr_addr(rts, from, sizeof *from),
 				      pr_echo_reply,
-				      rts->multicast)) {
+				      rts->multicast, wrong_source)) {
 			fflush(stdout);
 			return 0;
 		}
@@ -842,7 +882,7 @@ int ping6_parse_reply(struct ping_rts *rts, socket_st *sock,
 				      seq,
 				      hops, 0, tv, pr_addr(rts, from, sizeof *from),
 				      pr_niquery_reply,
-				      rts->multicast))
+				      rts->multicast, 0))
 			return 0;
 	} else {
 		int nexthdr;
@@ -864,7 +904,7 @@ int ping6_parse_reply(struct ping_rts *rts, socket_st *sock,
 
 		nexthdr = iph1->ip6_nxt;
 
-		if (nexthdr == 44) {
+		if (nexthdr == NEXTHDR_FRAGMENT) {
 			nexthdr = *(uint8_t *)icmph1;
 			icmph1++;
 		}

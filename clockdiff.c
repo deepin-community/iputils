@@ -49,6 +49,8 @@
  * number of messages sent in each measurement.
  */
 
+#define _GNU_SOURCE
+
 #define TSPTYPES
 
 #include <arpa/inet.h>
@@ -208,7 +210,7 @@ static int measure_inner_loop(struct run_state *ctl, struct measure_vars *mv)
 	struct pollfd p = { .fd = ctl->sock_raw, .events = POLLIN | POLLHUP };
 
 	{
-		long tmo = ctl->rtt + ctl->rtt_sigma;
+		long tmo = MAX(ctl->rtt + ctl->rtt_sigma, 1);
 
 		mv->tout.tv_sec = tmo / 1000;
 		mv->tout.tv_nsec = (tmo - (tmo / 1000) * 1000) * 1000000;
@@ -452,14 +454,14 @@ static void usage(int exit_status)
 		"  clockdiff [options] <destination>\n"
 		"\nOptions:\n"
 		"                without -o, use icmp timestamp only (see RFC0792, page 16)\n"
-		"  -o            use ip timestamp and icmp echo\n"
-		"  -o1           use three-term ip timestamp and icmp echo\n"
+		"  -o            use IP timestamp and icmp echo\n"
+		"  -o1           use three-term IP timestamp and icmp echo\n"
 		"  -T, --time-format <ctime|iso>\n"
 		"                  specify display time format, ctime is the default\n"
 		"  -I            alias of --time-format=iso\n"
 		"  -h, --help    display this help\n"
 		"  -V, --version print version and exit\n"
-		"  <destination> dns name or ip address\n"
+		"  <destination> DNS name or IP address\n"
 		"\nFor more details see clockdiff(8).\n"));
 	exit(exit_status);
 }
@@ -496,6 +498,7 @@ static void parse_opts(struct run_state *ctl, int argc, char **argv)
 			break;
 		case 'V':
 			printf(IPUTILS_VERSION("clockdiff"));
+			print_config();
 			exit(0);
 		case 'h':
 			usage(0);
@@ -611,15 +614,17 @@ int main(int argc, char **argv)
 			struct tm tm;
 			localtime_r(&now, &tm);
 
-			if (ctl.time_format == time_format_iso) {
-				strftime(s, sizeof(s), "%Y-%m-%dT%H:%M:%S%z\n", &tm);
-			} else
+			if (ctl.time_format == time_format_iso)
+				strftime(s, sizeof(s), "%Y-%m-%dT%H:%M:%S%z", &tm);
+			else
 				strftime(s, sizeof(s), "%a %b %e %H:%M:%S %Y", &tm);
-			printf(_("\nhost=%s rtt=%ld(%ld)ms/%ldms delta=%dms/%dms %s"),
+
+			printf(_("\nhost=%s rtt=%ld(%ld)ms/%ldms delta=%dms/%dms %s\n"),
 				ctl.hisname, ctl.rtt, ctl.rtt_sigma, ctl.min_rtt,
 				ctl.measure_delta, ctl.measure_delta1, s);
-		} else
+		} else {
 			printf("%ld %d %d\n", now, ctl.measure_delta, ctl.measure_delta1);
+		}
 	}
 	exit(0);
 }
