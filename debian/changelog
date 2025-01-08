@@ -1,3 +1,9 @@
+iputils (3:20240117-1deepin1) unstable; urgency=medium
+
+  * Move to main.
+
+ -- Tianyu Chen <sweetyfish@deepin.org>  Wed, 08 Jan 2025 14:20:03 +0800
+
 iputils (3:20240117-1) unstable; urgency=medium
 
   * New upstream version. See /usr/share/doc/iputils-*/changelog.gz for
