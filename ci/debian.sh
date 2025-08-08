@@ -1,5 +1,6 @@
 #!/bin/sh
-# Copyright (c) 2019-2021 Petr Vorel <petr.vorel@gmail.com>
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (c) 2019-2024 Petr Vorel <petr.vorel@gmail.com>
 set -ex
 
 if [ "$DISTRO_VERSION" = "xenial" ]; then
@@ -20,11 +21,11 @@ apt install -y --no-install-recommends \
 	file \
 	gcc \
 	gettext \
+	git \
 	iproute2 \
+	jq \
 	libcap-dev \
 	libidn2-0-dev \
-	libssl-dev \
-	make \
 	meson \
 	pkg-config \
 	xsltproc

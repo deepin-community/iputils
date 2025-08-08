@@ -50,6 +50,7 @@ void usage(void)
 		"  ping [options] <destination>\n"
 		"\nOptions:\n"
 		"  <destination>      DNS name or IP address\n"
+		"  -3                 RTT precision (do not round up the result time)\n"
 		"  -a                 use audible ping\n"
 		"  -A                 use adaptive ping\n"
 		"  -B                 sticky source address\n"
@@ -201,7 +202,7 @@ void drop_capabilities(void)
 /* Fills all the outpack, excluding ICMP header, but _including_
  * timestamp area with supplied pattern.
  */
-void fill(struct ping_rts *rts, char *patp, unsigned char *packet, size_t packet_size)
+void fill(struct ping_rts *rts, char *patp, unsigned char *packet, unsigned packet_size)
 {
 	int ii, jj;
 	unsigned int pat[16];
@@ -223,10 +224,8 @@ void fill(struct ping_rts *rts, char *patp, unsigned char *packet, size_t packet
 		    &pat[12], &pat[13], &pat[14], &pat[15]);
 
 	if (ii > 0) {
-		size_t kk;
-		size_t max = packet_size < (size_t)ii + 8 ? 0 : packet_size - (size_t)ii + 8;
-
-		for (kk = 0; kk <= max; kk += ii)
+		unsigned kk;
+		for (kk = 0; kk <= packet_size - (8 + ii); kk += ii)
 			for (jj = 0; jj < ii; ++jj)
 				bp[jj + kk] = pat[jj];
 	}
@@ -266,8 +265,9 @@ int __schedule_exit(int next)
 		waittime = 2 * global_rts->tmax;
 		if (waittime < 1000 * (unsigned long)global_rts->interval)
 			waittime = 1000 * global_rts->interval;
-	} else
-		waittime = global_rts->lingertime * 1000;
+	} else {
+		waittime = global_rts->lingertime;
+	}
 
 	if (next < 0 || (unsigned long)next < waittime / 1000)
 		next = waittime / 1000;
@@ -282,7 +282,7 @@ int __schedule_exit(int next)
 
 static inline void update_interval(struct ping_rts *rts)
 {
-	int est = rts->rtt ? rts->rtt / 8 : rts->interval * 1000;
+	int est = rts->rtt ? (int)(rts->rtt / 8) : rts->interval * 1000;
 
 	rts->interval = (est + rts->rtt_addend + 500) / 1000;
 	if (rts->uid && rts->interval < MIN_USER_INTERVAL_MS)
@@ -389,7 +389,7 @@ resend:
 		if (nores_interval > 500)
 			nores_interval = 500;
 		oom_count++;
-		if (oom_count * nores_interval < rts->lingertime)
+		if ((uint32_t)(oom_count * nores_interval) < rts->lingertime/1000)
 			return nores_interval;
 		i = 0;
 		/* Fall to hard error. It is to avoid complete deadlock
@@ -400,6 +400,10 @@ resend:
 		/* Socket buffer is full. */
 		tokens += rts->interval;
 		return MIN_INTERVAL_MS;
+	} else if (errno == EMSGSIZE) {
+		/* For example, sendto with len > 65527 on SOCK_DGRAM fails with this errno. */
+		rts->nerrors++;
+		i = 0;
 	} else {
 		if ((i = fset->receive_error_msg(rts, sock)) > 0) {
 			/* An ICMP error arrived. In this case, we've received
@@ -445,9 +449,18 @@ void sock_setbufs(struct ping_rts *rts, socket_st *sock, int alloc)
 		rts->sndbuf = alloc;
 	setsockopt(sock->fd, SOL_SOCKET, SO_SNDBUF, (char *)&rts->sndbuf, sizeof(rts->sndbuf));
 
-	rcvbuf = hold = alloc * rts->preload;
+	if (alloc > INT_MAX / rts->preload) {
+		error(0, 0, _("WARNING: buffer size overflow, reduce packet size or preload"));
+		hold = INT_MAX;
+	} else {
+		hold = alloc * rts->preload;
+	}
+
+	rcvbuf = hold;
+
 	if (hold < 65536)
 		hold = 65536;
+
 	setsockopt(sock->fd, SOL_SOCKET, SO_RCVBUF, (char *)&hold, sizeof(hold));
 	if (getsockopt(sock->fd, SOL_SOCKET, SO_RCVBUF, (char *)&hold, &tmplen) == 0) {
 		if (hold < rcvbuf)
@@ -455,20 +468,28 @@ void sock_setbufs(struct ping_rts *rts, socket_st *sock, int alloc)
 	}
 }
 
-void sock_setmark(unsigned int mark, int fd)
+void sock_setmark(struct ping_rts *rts, int fd)
 {
 #ifdef SO_MARK
 	int ret;
 	int errno_save;
 
+	if (!rts->opt_mark)
+		return;
+
 	enable_capability_admin();
-	ret = setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark));
+	ret = setsockopt(fd, SOL_SOCKET, SO_MARK, &(rts->mark), sizeof(rts->mark));
 	errno_save = errno;
 	disable_capability_admin();
 
-	/* Do not exit, old kernels do not support mark. */
-	if (ret == -1)
-		error(0, errno_save, _("WARNING: failed to set mark: %u"), mark);
+	if (ret == -1) {
+		error(0, errno_save, _("WARNING: failed to set mark: %u"), rts->mark);
+
+		if (errno_save == EPERM)
+			error(0, 0, _("=> missing cap_net_admin+p or cap_net_raw+p (since Linux 5.17) capability?"));
+
+		rts->opt_mark = 0;
+	}
 #else
 		error(0, errno_save, _("WARNING: SO_MARK not supported"));
 #endif
@@ -506,8 +527,7 @@ void setup(struct ping_rts *rts, socket_st *sock)
 	}
 #endif
 
-	if (rts->opt_mark)
-		sock_setmark(rts->mark, sock->fd);
+	sock_setmark(rts, sock->fd);
 
 	/* Set some SNDTIMEO to prevent blocking forever
 	 * on sends, when device is too slow or stalls. Just put limit
@@ -529,7 +549,7 @@ void setup(struct ping_rts *rts, socket_st *sock)
 		rts->opt_flood_poll = 1;
 
 	if (!rts->opt_pingfilled) {
-		size_t i;
+		int i;
 		unsigned char *p = rts->outpack + 8;
 
 		/* Do not forget about case of small datalen, fill timestamp area too! */
@@ -744,16 +764,32 @@ int gather_statistics(struct ping_rts *rts, uint8_t *icmph, int icmplen,
 
 restamp:
 		tvsub(tv, &tmp_tv);
-		triptime = tv->tv_sec * 1000000 + tv->tv_usec;
-		if (triptime < 0) {
-			error(0, 0, _("Warning: time of day goes back (%ldus), taking countermeasures"), triptime);
+
+		if (tv->tv_usec >= 1000000) {
+			error(0, 0, _("Warning: invalid tv_usec %ld us"), tv->tv_usec);
+			tv->tv_usec = 999999;
+		}
+
+		if (tv->tv_usec < 0) {
+			error(0, 0, _("Warning: invalid tv_usec %ld us"), tv->tv_usec);
+			tv->tv_usec = 0;
+		}
+
+		if (tv->tv_sec > TV_SEC_MAX_VAL) {
+			error(0, 0, _("Warning: invalid tv_sec %ld s"), tv->tv_sec);
+			triptime = 0;
+		} else if (tv->tv_sec < 0) {
+			error(0, 0, _("Warning: time of day goes back (%ld s), taking countermeasures"), tv->tv_sec);
 			triptime = 0;
 			if (!rts->opt_latency) {
 				gettimeofday(tv, NULL);
 				rts->opt_latency = 1;
 				goto restamp;
 			}
+		} else {
+			triptime = tv->tv_sec * 1000000 + tv->tv_usec;
 		}
+
 		if (!csfailed) {
 			rts->tsum += triptime;
 			rts->tsum2 += (double)((long long)triptime * (long long)triptime);
@@ -762,7 +798,7 @@ restamp:
 			if (triptime > rts->tmax)
 				rts->tmax = triptime;
 			if (!rts->rtt)
-				rts->rtt = triptime * 8;
+				rts->rtt = ((uint64_t)triptime) * 8;
 			else
 				rts->rtt += triptime - rts->rtt / 8;
 			if (rts->opt_adaptive)
@@ -792,7 +828,7 @@ restamp:
 		else
 			write_stdout("\bC", 2);
 	} else {
-		size_t i;
+		int i;
 		uint8_t *cp, *dp;
 
 		print_timestamp(rts);
@@ -807,22 +843,37 @@ restamp:
 		if (hops >= 0)
 			printf(_(" ttl=%d"), hops);
 
-		if ((size_t)cc < rts->datalen + 8) {
+		if (cc < rts->datalen + 8) {
 			printf(_(" (truncated)\n"));
 			return 1;
 		}
 		if (rts->timing) {
-			if (triptime >= 100000 - 50)
-				printf(_(" time=%ld ms"), (triptime + 500) / 1000);
-			else if (triptime >= 10000 - 5)
-				printf(_(" time=%ld.%01ld ms"), (triptime + 50) / 1000,
-				       ((triptime + 50) % 1000) / 100);
-			else if (triptime >= 1000)
-				printf(_(" time=%ld.%02ld ms"), (triptime + 5) / 1000,
-				       ((triptime + 5) % 1000) / 10);
-			else
-				printf(_(" time=%ld.%03ld ms"), triptime / 1000,
-				       triptime % 1000);
+			char *fmt;
+			char fmt2[30];
+			long int num, dec = 0;
+
+			if (rts->opt_rtt_precision) {
+				fmt = "%ld.%03ld";
+				num = triptime / 1000;
+				dec = triptime % 1000;
+			} else if (triptime >= 100000 - 50) {
+				fmt = "%ld";
+				num = (triptime + 500) / 1000;
+			} else if (triptime >= 10000 - 5) {
+				fmt = "%ld.%01ld";
+				num = (triptime + 50) / 1000;
+				dec = ((triptime + 50) % 1000) / 100;
+			} else if (triptime >= 1000) {
+				fmt = "%ld.%02ld";
+				num = (triptime + 5) / 1000;
+				dec = ((triptime + 5) % 1000) / 10;
+			} else {
+				fmt = "%ld.%03ld";
+				num = triptime / 1000;
+				dec = triptime % 1000;
+			}
+			snprintf(fmt2, sizeof(fmt2), _(" time=%s ms"), fmt);
+			printf(fmt2, num, dec);
 		}
 
 		if (dupflag && (!multicast || rts->opt_verbose))
@@ -837,12 +888,12 @@ restamp:
 		dp = &rts->outpack[8 + sizeof(struct timeval)];
 		for (i = sizeof(struct timeval); i < rts->datalen; ++i, ++cp, ++dp) {
 			if (*cp != *dp) {
-				printf(_("\nwrong data byte #%zu should be 0x%x but was 0x%x"),
+				printf(_("\nwrong data byte #%d should be 0x%x but was 0x%x"),
 				       i, *dp, *cp);
 				cp = (unsigned char *)ptr + sizeof(struct timeval);
 				for (i = sizeof(struct timeval); i < rts->datalen; ++i, ++cp) {
 					if ((i % 32) == sizeof(struct timeval))
-						printf("\n#%zu\t", i);
+						printf("\n#%d\t", i);
 					printf("%x ", *cp);
 				}
 				break;
@@ -896,7 +947,7 @@ int finish(struct ping_rts *rts)
 #endif
 		printf(_(", %g%% packet loss"),
 		       (float)((((long long)(rts->ntransmitted - rts->nreceived)) * 100.0) / rts->ntransmitted));
-		printf(_(", time %ldms"), 1000 * tv.tv_sec + (tv.tv_nsec + 500000) / 1000000);
+		printf(_(", time %llums"), (unsigned long long)(1000 * tv.tv_sec + (tv.tv_nsec + 500000) / 1000000));
 	}
 
 	putchar('\n');
@@ -932,7 +983,7 @@ int finish(struct ping_rts *rts)
 		int ipg = (1000000 * (long long)tv.tv_sec + tv.tv_nsec / 1000) / (rts->ntransmitted - 1);
 
 		printf(_("%sipg/ewma %d.%03d/%d.%03d ms"),
-		       comma, ipg / 1000, ipg % 1000, rts->rtt / 8000, (rts->rtt / 8) % 1000);
+		       comma, ipg / 1000, ipg % 1000, (int)(rts->rtt / 8000), (int)((rts->rtt / 8) % 1000));
 	}
 	putchar('\n');
 	return (!rts->nreceived || (rts->deadline && rts->nreceived < rts->npackets));
@@ -957,7 +1008,7 @@ void status(struct ping_rts *rts)
 		fprintf(stderr, _(", min/avg/ewma/max = %ld.%03ld/%lu.%03ld/%d.%03d/%ld.%03ld ms"),
 			(long)rts->tmin / 1000, (long)rts->tmin % 1000,
 			tavg / 1000, tavg % 1000,
-			rts->rtt / 8000, (rts->rtt / 8) % 1000, (long)rts->tmax / 1000, (long)rts->tmax % 1000);
+			(int)(rts->rtt / 8000), (int)((rts->rtt / 8) % 1000), (long)rts->tmax / 1000, (long)rts->tmax % 1000);
 	}
 	fprintf(stderr, "\n");
 }
