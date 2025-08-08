@@ -284,8 +284,9 @@ static int recverr(struct run_state *const ctl)
 		struct timespec res;
 
 		timespecsub(&ts, retts, &res);
-		printf(_("%3ld.%03ldms "), res.tv_sec * 1000 + res.tv_nsec / 1000000,
-					   (res.tv_nsec % 1000000) / 1000);
+		printf(_("%3lld.%03ldms "), (long long int)res.tv_sec * 1000
+			   + res.tv_nsec / 1000000, (res.tv_nsec % 1000000) / 1000);
+
 		if (broken_router)
 			printf(_("(This broken router returned corrupted payload) "));
 	}
@@ -470,7 +471,7 @@ int main(int argc, char **argv)
 			ctl.show_both = 1;
 			break;
 		case 'l':
-			ctl.mtu = strtol_or_err(optarg, _("invalid argument"), ctl.overhead, INT_MAX);
+			ctl.mtu = strtol_or_err(optarg, _("invalid argument"), 0, INT_MAX);
 			break;
 		case 'm':
 			ctl.max_hops = strtol_or_err(optarg, _("invalid argument"), 0, MAX_HOPS_LIMIT);

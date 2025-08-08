@@ -1,5 +1,6 @@
 #!/bin/sh
-# Copyright (c) 2019-2021 Petr Vorel <petr.vorel@gmail.com>
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (c) 2019-2024 Petr Vorel <petr.vorel@gmail.com>
 set -ex
 
 apk update
@@ -9,12 +10,14 @@ apk add \
 	clang \
 	docbook-xml \
 	docbook-xsl \
+	file \
 	gcc \
-	iproute2 \
+	git \
 	gettext-dev \
+	iproute2 \
+	jq \
 	libcap-dev \
 	libxslt \
-	make \
 	meson \
 	musl-dev \
 	pkgconfig

@@ -1,13 +1,42 @@
-iputils (3:20240117-1deepin1) unstable; urgency=medium
+iputils (3:20250605-1) unstable; urgency=medium
 
-  * Move to main.
+  * New upstream release
+    - Fix CVE-2025-47268: Signed 64-bit integer overflow in RTT calculation
+      (Closes: #1104746)
+    - Fix CVE-2025-48964: Integer Overflow in ping Statistics via Zero
+      Timestamp (Closes: #1109728)
 
- -- Tianyu Chen <sweetyfish@deepin.org>  Wed, 08 Jan 2025 14:20:03 +0800
+ -- Noah Meyerhans <noahm@debian.org>  Thu, 24 Jul 2025 08:58:19 -0400
+
+iputils (3:20240905-3) unstable; urgency=medium
+
+  * clockdiff: Fix setcap invocation (Closes: #1103864)
+  * Update NEWS entry for ICMP_PROTO datagram socket use
+
+ -- Noah Meyerhans <noahm@debian.org>  Tue, 22 Apr 2025 07:36:44 -0400
+
+iputils (3:20240905-2) unstable; urgency=medium
+
+  * Add autopkgtests
+  * Add a debian/NEWS entry describing the use of ICMP_PROTO sockets
+
+ -- Noah Meyerhans <noahm@debian.org>  Mon, 21 Apr 2025 07:50:37 -0400
+
+iputils (3:20240905-1) unstable; urgency=medium
+
+  * New upstream release
+  * Drop unused libgcrypt-dev builddep (Closes: #1071869)
+  * ping: Add Recommends on linux-sysctl-defaults and stop setting additional
+    capabilities (Closes: #1008281)
+  * Replace pkg-config with pkgconf in build-deps
+  * Set cap_sys_nice in iputils-clockdiff (Closes: #991252)
+
+ -- Noah Meyerhans <noahm@debian.org>  Tue, 24 Sep 2024 12:24:14 -0400
 
 iputils (3:20240117-1) unstable; urgency=medium
 
   * New upstream version. See /usr/share/doc/iputils-*/changelog.gz for
-    full details.
+    full details. (Closes: #1009005, #1037310, #1040313, #650479)
   * Move ping to /usr for DEP17. (Closes: #711492, #1059916)
   * Update debian/watch (Thanks Petr Vorel <pvorel@suse.cz) (Closes: #1059728)
   * Update debian/copyright to correct Upstream-Contact field

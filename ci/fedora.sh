@@ -1,15 +1,19 @@
 #!/bin/sh
-# Copyright (c) 2019-2021 Petr Vorel <petr.vorel@gmail.com>
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (c) 2019-2024 Petr Vorel <petr.vorel@gmail.com>
 set -ex
 
 yum -y install \
 	clang \
+	file \
+	findutils \
 	gcc \
 	gettext \
+	git \
 	iproute \
+	jq \
 	libcap-devel \
 	libxslt \
-	make \
 	pkg-config
 
 if [ "$(basename $0)" = "centos.sh" ] || [ "$(basename $0)" = "rockylinux.sh" ]; then
