@@ -1,3 +1,9 @@
+iputils (3:20250605-1deepin1) unstable; urgency=medium
+
+  * Fix the issue where non-root users cannot ping
+
+ -- lhdjply <lhdjply@126.com>  Wed, 27 Aug 2025 15:28:48 +0800
+
 iputils (3:20250605-1) unstable; urgency=medium
 
   * New upstream release
